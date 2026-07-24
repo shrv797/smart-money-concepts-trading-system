@@ -10,48 +10,48 @@ warnings.filterwarnings("ignore")
 # اندیکاتورها
 # ==========================================
 
-def calc_ema(series, period):
-    return (
-        pd.Series(series)
-        .ewm(span=period, adjust=False)
-        .mean()
-        .values
-    )
-# در این تابع میانگین متحرک نمایی محاسبه میشود
-#قیمت بالای ای ام ای روند صعودی و پایین روند نزولی ست
+# def calc_ema(series, period):
+#     return (
+#         pd.Series(series)
+#         .ewm(span=period, adjust=False)
+#         .mean()
+#         .values
+#     )
+# # در این تابع میانگین متحرک نمایی محاسبه میشود
+# #قیمت بالای ای ام ای روند صعودی و پایین روند نزولی ست
 
-def calc_atr(high, low, close, period):
-    """
-    Wilder ATR
-    """
+# def calc_atr(high, low, close, period):
+#     """
+#     Wilder ATR
+#     """
 
-    high = pd.Series(high)
-    low = pd.Series(low)
-    close = pd.Series(close)
+#     high = pd.Series(high)
+#     low = pd.Series(low)
+#     close = pd.Series(close)
 
-    prev_close = close.shift(1)
+#     prev_close = close.shift(1)
 
-    tr = pd.concat(
-        [
-            high - low,
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
+#     tr = pd.concat(
+#         [
+#             high - low,
+#             (high - prev_close).abs(),
+#             (low - prev_close).abs(),
+#         ],
+#         axis=1,
+#     ).max(axis=1)
 
-    atr = tr.ewm(
-        alpha=1 / period,
-        adjust=False
-    ).mean()
+#     atr = tr.ewm(
+#         alpha=1 / period,
+#         adjust=False
+#     ).mean()
 
-    return atr.values
+#     return atr.values
 
-# با کمک این تابع و ای تی آر نوسانات بازار را اندازه گیری کردیم
-#برای استاپ لاس و فسلتر کردن کندل های خیلی کوچک
-# ==========================================
-# Strategy
-# ==========================================
+# # با کمک این تابع و ای تی آر نوسانات بازار را اندازه گیری کردیم
+# #برای استاپ لاس و فسلتر کردن کندل های خیلی کوچک
+# # ==========================================
+# # Strategy
+# # ==========================================
 
 class AdvancedShadowStrategy(Strategy):
 
@@ -61,9 +61,9 @@ class AdvancedShadowStrategy(Strategy):
 
     tolerance = 0.002
 
-    ema_period = 200
+    #ema_period = 200
 
-    atr_period = 14
+    #atr_period = 14
 
     rr_ratio = 2.0
 
@@ -73,25 +73,25 @@ class AdvancedShadowStrategy(Strategy):
 
     min_zone_touches = 2
 
-    body_atr_filter = 0.10
+    #body_atr_filter = 0.10
 
     # --------------------------------
 
     def init(self):
 # محاسبات لازم را انجام می دهیم در این تابع
-        self.ema = self.I(
-            calc_ema,
-            self.data.Close,
-            self.ema_period
-        )
+        # self.ema = self.I(
+        #     calc_ema,
+        #     self.data.Close,
+        #     self.ema_period
+        # )
 
-        self.atr = self.I(
-            calc_atr,
-            self.data.High,
-            self.data.Low,
-            self.data.Close,
-            self.atr_period
-        )
+        # self.atr = self.I(
+        #     calc_atr,
+        #     self.data.High,
+        #     self.data.Low,
+        #     self.data.Close,
+        #     self.atr_period
+        # )
 
         # Swing ها
 
@@ -207,8 +207,8 @@ class AdvancedShadowStrategy(Strategy):
 
         if (
             idx < 2 * n + 5
-            or np.isnan(self.ema[-1])
-            or np.isnan(self.atr[-1])
+            # or np.isnan(self.ema[-1])
+            # or np.isnan(self.atr[-1])
         ):
             return
 
@@ -292,13 +292,13 @@ class AdvancedShadowStrategy(Strategy):
         high = self.data.High[-1]
         low = self.data.Low[-1]
 
-        ema = self.ema[-1]
-        atr = self.atr[-1]
+        # ema = self.ema[-1]
+        # atr = self.atr[-1]
 
         body = abs(close - open_)
 
         # جلوگیری از سیگنال‌های ناشی از دوجی‌های خیلی کوچک
-        if body < atr * self.body_atr_filter:
+        if body == 0 :
             return
 
         upper_shadow = high - max(open_, close)
@@ -361,7 +361,7 @@ class AdvancedShadowStrategy(Strategy):
         # SHORT
         # ======================================
 
-        if bearish_bos and close < ema and r_upper >= self.r_threshold:
+        if bearish_bos and r_upper >= self.r_threshold:
 
             for zone in self.res_zones:
 
@@ -380,14 +380,14 @@ class AdvancedShadowStrategy(Strategy):
                 # برخورد واقعی به مقاومت
                 if (
                     high >= z_low
-                    and high <= z_high + atr
+                    and high <= z_high 
                     and close < z_mid
                 ):
 
-                    sl = max(
-                        z_high + atr,
-                        high + atr * 0.20
-                    )
+                    sl = z_high
+                
+                    
+                    
 
                     risk = sl - close
 
@@ -409,7 +409,7 @@ class AdvancedShadowStrategy(Strategy):
         # LONG
         # ======================================
 
-        if bullish_bos and close > ema and r_lower >= self.r_threshold:
+        if bullish_bos  and r_lower >= self.r_threshold:
 
             for zone in self.sup_zones:
 
@@ -426,14 +426,13 @@ class AdvancedShadowStrategy(Strategy):
 
                 if (
                     low <= z_high
-                    and low >= z_low - atr
+                    and low >= z_low 
                     and close > z_mid
                 ):
 
-                    sl = min(
-                        z_low - atr,
-                        low - atr * 0.20
-                    )
+                    sl = z_low 
+                        
+                    
 
                     risk = close - sl
 
@@ -577,3 +576,8 @@ if __name__ == "__main__":
 # print(stats._strategy)
 # print("\nTrades:")
 # print(stats["# Trades"])
+trades = stats["_trades"]
+
+trades.to_excel("opt result.xlsx", index=False)
+
+print("Saved!")
