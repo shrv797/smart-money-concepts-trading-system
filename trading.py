@@ -1,23 +1,117 @@
-import pandas as pd
-import numpy as np
+#%%
+# ==========================================
+# Imports
+# ==========================================
+
+from binance.client import Client
 from backtesting import Backtest, Strategy
+import numpy as np
+import pandas as pd
 import warnings
-import xlwt as xt
 
 warnings.filterwarnings("ignore")
-# حذف و مخفی کردن پیام های غیرضروری
+
+
+#%%
 # ==========================================
-# اندیکاتورها
+# دریافت داده‌ی تاریخی از بایننس
 # ==========================================
 
-# لیست سراسری برای ثبت تمام برخوردهای قیمت با نواحی حمایت و مقاومت
-ZONE_TOUCH_LOG = []
+def get_historical_data(symbol, interval, start_time, end_time):
 
+    client = Client()
+
+    klines = client.get_historical_klines(
+        symbol=symbol,
+        interval=getattr(Client, 'KLINE_INTERVAL_' + interval),
+        start_str=start_time,
+        end_str=end_time
+    )
+
+    data = pd.DataFrame(
+        np.array(klines)[:, :6],
+        columns=[
+            'Timestamp',
+            'Open',
+            'High',
+            'Low',
+            'Close',
+            'Volume'
+        ]
+    ).apply(pd.to_numeric)
+
+    data.index = pd.to_datetime(data.Timestamp, unit='ms')
+    data.drop(columns=['Timestamp'], inplace=True)
+
+    return data
+
+
+#%%
+# بازه‌ی کلی داده رو بگیر - هرچقدر بازه بزرگ‌تر باشه پنجره‌های بیشتری برای
+# walk-forward خواهی داشت
+df = get_historical_data('BTCUSDT', '1HOUR', '2023-01-01', '2026-03-01').iloc[:-1]
+df
+
+
+#%%
+# ==========================================
+# ساخت پنجره‌های walk-forward
+# هر پنجره: ۴ ماه train + ۲ ماه test
+# پنجره‌ی بعدی با گام ۲ ماه (طول test) به جلو حرکت می‌کند
+# ==========================================
+
+def build_walk_forward_windows(data, train_months=4, test_months=2, step_months=2):
+
+    windows = []
+
+    start = data.index[0]
+    end = data.index[-1]
+
+    while True:
+
+        train_start = start
+        train_end = train_start + pd.DateOffset(months=train_months)
+        test_start = train_end
+        test_end = test_start + pd.DateOffset(months=test_months)
+
+        if test_end > end:
+            break
+
+        windows.append(
+            {
+                "train_start": train_start,
+                "train_end": train_end,
+                "test_start": test_start,
+                "test_end": test_end,
+            }
+        )
+
+        start = start + pd.DateOffset(months=step_months)
+
+    return windows
+
+
+windows = build_walk_forward_windows(df, train_months=4, test_months=2, step_months=2)
+
+print(f"تعداد پنجره‌های walk-forward: {len(windows)}\n")
+
+for i, w in enumerate(windows):
+    print(
+        f"Window {i+1}: "
+        f"Train [{w['train_start'].date()} -> {w['train_end'].date()}]  "
+        f"Test [{w['test_start'].date()} -> {w['test_end'].date()}]"
+    )
+
+
+#%%
+# ==========================================
+# استراتژی
+# ==========================================
 
 class AdvancedShadowStrategy(Strategy):
 
     # ---------- Parameters ----------
-    n_swing = 3  # 5
+    n_swing = 3
 
     tolerance = 0.002
 
@@ -50,6 +144,9 @@ class AdvancedShadowStrategy(Strategy):
 
         # جلوگیری از ورود تکراری
         self.last_trade_zone = None
+
+        # ثبت تمام برخوردهای قیمت با نواحی حمایت/مقاومت (per-instance، نه global)
+        self.touch_log = []
 
     # ==========================================
     def update_zones(self, new_price, zones, index):
@@ -96,11 +193,8 @@ class AdvancedShadowStrategy(Strategy):
 
     # ==========================================
     def log_zone_touch(self, zone, zone_type, high, low, close, signal, trade_taken):
-        """
-        ثبت هر برخورد کندل جاری با یک ناحیه حمایت/مقاومت
-        """
 
-        ZONE_TOUCH_LOG.append(
+        self.touch_log.append(
             {
                 "time": self.data.index[-1],
                 "zone_type": zone_type,
@@ -189,8 +283,6 @@ class AdvancedShadowStrategy(Strategy):
 
         # ======================================
         # ثبت برخوردهای قیمت با نواحی مقاومت و حمایت
-        # (این بخش مستقل از باز بودن معامله یا سیگنال اجرا میشود
-        #  تا تمام برخوردها ثبت شوند، نه فقط آنهایی که منجر به معامله میشوند)
         # ======================================
 
         for zone in self.res_zones:
@@ -222,7 +314,7 @@ class AdvancedShadowStrategy(Strategy):
             return
 
         # ======================================
-        # BOS and CHOCH
+        # BOS
         # ======================================
 
         bullish_bos = False
@@ -268,16 +360,14 @@ class AdvancedShadowStrategy(Strategy):
 
                     self.last_trade_zone = z_mid
 
-                    # به‌روزرسانی آخرین رکورد ثبت‌شده برای این ناحیه: معامله انجام شد
-                    if ZONE_TOUCH_LOG:
-                        for rec in reversed(ZONE_TOUCH_LOG):
-                            if (
-                                rec["time"] == self.data.index[-1]
-                                and rec["zone_type"] == "resistance"
-                                and rec["zone_level"] == z_mid
-                            ):
-                                rec["trade_taken"] = True
-                                break
+                    for rec in reversed(self.touch_log):
+                        if (
+                            rec["time"] == self.data.index[-1]
+                            and rec["zone_type"] == "resistance"
+                            and rec["zone_level"] == z_mid
+                        ):
+                            rec["trade_taken"] = True
+                            break
 
                     return
 
@@ -313,59 +403,51 @@ class AdvancedShadowStrategy(Strategy):
 
                     self.last_trade_zone = z_mid
 
-                    if ZONE_TOUCH_LOG:
-                        for rec in reversed(ZONE_TOUCH_LOG):
-                            if (
-                                rec["time"] == self.data.index[-1]
-                                and rec["zone_type"] == "support"
-                                and rec["zone_level"] == z_mid
-                            ):
-                                rec["trade_taken"] = True
-                                break
+                    for rec in reversed(self.touch_log):
+                        if (
+                            rec["time"] == self.data.index[-1]
+                            and rec["zone_type"] == "support"
+                            and rec["zone_level"] == z_mid
+                        ):
+                            rec["trade_taken"] = True
+                            break
 
                     return
 
 
+#%%
 # ==========================================
-# اجرای بک تست
+# اجرای walk-forward: برای هر پنجره، اپتیمایز روی train و اجرا روی test
 # ==========================================
 
-if __name__ == "__main__":
+OPT_GRID = dict(
+    n_swing=[3, 5, 7],
+    rr_ratio=[1.5, 2, 2.5],
+    r_threshold=[1.5, 2, 2.5],
+)
 
-    try:
+summary_rows = []
+all_test_touches = []
+all_test_trades = []
 
-        df = pd.read_csv("btc-opt (1).csv")
+for i, w in enumerate(windows):
 
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"])
-        df.set_index("Timestamp", inplace=True)
+    window_id = i + 1
 
-        for col in ["Unnamed: 0", "index"]:
-            if col in df.columns:
-                df.drop(col, axis=1, inplace=True)
+    train_df = df[w["train_start"]: w["train_end"]]
+    test_df = df[w["test_start"]: w["test_end"]]
 
-        cols = ["Open", "High", "Low", "Close"]
+    if len(train_df) < 50 or len(test_df) < 20:
+        print(f"Window {window_id}: داده ناکافی، رد شد.")
+        continue
 
-        for c in cols:
-            df[c] = df[c].astype(float)
+    print(f"\n========== Window {window_id} ==========")
+    print(f"Train: {w['train_start'].date()} -> {w['train_end'].date()} ({len(train_df)} rows)")
+    print(f"Test:  {w['test_start'].date()} -> {w['test_end'].date()} ({len(test_df)} rows)")
 
-        if "Volume" in df.columns:
-            df["Volume"] = df["Volume"].astype(float)
-
-    except FileNotFoundError:
-
-        print("CSV File Not Found")
-        exit()
-
-    except Exception as e:
-
-        print(e)
-        exit()
-
-    # پاک کردن لاگ نواحی قبل از هر اجرای جدید بک تست
-    ZONE_TOUCH_LOG.clear()
-
-    bt = Backtest(
-        df,
+    # ---------- اپتیمایز  train ----------
+    bt_train = Backtest(
+        train_df,
         AdvancedShadowStrategy,
         cash=1_000_000,
         commission=0.0001,
@@ -373,48 +455,90 @@ if __name__ == "__main__":
         exclusive_orders=True,
     )
 
-    stats = bt.run()
+    stats_train = bt_train.optimize(
+        maximize="Return [%]",
+        max_tries=100,
+        **OPT_GRID,
+    )
 
-    print("\n========== RESULT ==========\n")
-    print(stats)
+    best_n_swing = stats_train._strategy.n_swing
+    best_rr_ratio = stats_train._strategy.rr_ratio
+    best_r_threshold = stats_train._strategy.r_threshold
 
-    print("\n========== TRADES ==========\n")
+    print(
+        f"بهترین پارامترها -> n_swing={best_n_swing}, "
+        f"rr_ratio={best_rr_ratio}, r_threshold={best_r_threshold}"
+    )
 
-    info = stats["_trades"]
-    print(info)
+    # --------------  test با پارامترهای ثابت ----------
+    class TunedStrategy(AdvancedShadowStrategy):
+        n_swing = best_n_swing
+        rr_ratio = best_rr_ratio
+        r_threshold = best_r_threshold
 
-    # ------------------------
-    # خروجی معاملات (اکسل قدیمی با xlwt)
+    bt_test = Backtest(
+        test_df,
+        TunedStrategy,
+        cash=1_000_000,
+        commission=0.0001,
+        trade_on_close=True,
+        exclusive_orders=True,
+    )
 
-    columns = list(stats["_trades"].columns)
-    wb = xt.Workbook()
-    sh = wb.add_sheet('btc_opt')
-    indx = len(columns)
-    indx2 = len(columns)
-    for coll in columns:
-        sh.write(0, indx2 - indx, str(coll))
-        indx -= 1
-    indx = len(columns)
+    stats_test = bt_test.run()
 
-    for i in range(len(info)):
-        for col in columns:
-            sh.write(i + 1, indx2 - indx, str(info[col][i]))
-            indx -= 1
-        indx = len(columns)
+    print(f"Test Return [%]: {stats_test['Return [%]']:.2f}")
 
-    wb.save('trade_info.xlsx')
+    # ---------- ذخیره‌ی خلاصه‌ی این پنجره ----------
+    summary_rows.append(
+        {
+            "window": window_id,
+            "train_start": w["train_start"],
+            "train_end": w["train_end"],
+            "test_start": w["test_start"],
+            "test_end": w["test_end"],
+            "best_n_swing": best_n_swing,
+            "best_rr_ratio": best_rr_ratio,
+            "best_r_threshold": best_r_threshold,
+            "train_return_pct": stats_train["Return [%]"],
+            "test_return_pct": stats_test["Return [%]"],
+            "test_trades": stats_test["# Trades"],
+            "test_win_rate_pct": stats_test["Win Rate [%]"],
+            "test_max_drawdown_pct": stats_test["Max. Drawdown [%]"],
+        }
+    )
 
-    # ------------------------
-    # خروجی معاملات (فرمت جدید)
+    # ---------- تجمیع معاملات و برخوردهای test هر پنجره ----------
+    test_trades_df = stats_test["_trades"].copy()
+    test_trades_df["window"] = window_id
+    all_test_trades.append(test_trades_df)
 
-    trades = stats["_trades"]
-    trades.to_excel("opt result.xlsx", index=False)
+    test_touches_df = pd.DataFrame(stats_test._strategy.touch_log)
+    if not test_touches_df.empty:
+        test_touches_df["window"] = window_id
+        all_test_touches.append(test_touches_df)
 
-    # ------------------------
-    # خروجی ثبت برخوردها با نواحی حمایت و مقاومت
 
-    zones_df = pd.DataFrame(ZONE_TOUCH_LOG)
-    zones_df.to_excel("zone_touches.xlsx", index=False)
+#%%
+# ==========================================
+# ذخیره‌ی خروجی نهایی
+# ==========================================
 
-    print(f"\nتعداد برخوردهای ثبت‌شده با نواحی: {len(ZONE_TOUCH_LOG)}")
-    print("Saved!")
+summary_df = pd.DataFrame(summary_rows)
+summary_df.to_excel("walk_forward_summary.xlsx", index=False)
+print(f"\n{len(summary_df)} پنجره در walk_forward_summary.xlsx ذخیره شد")
+
+if all_test_trades:
+    combined_trades = pd.concat(all_test_trades, ignore_index=True)
+    combined_trades.to_excel("walk_forward_test_trades.xlsx", index=False)
+    print(f"{len(combined_trades)} معامله (فقط از بازه‌های test) در walk_forward_test_trades.xlsx ذخیره شد")
+
+if all_test_touches:
+    combined_touches = pd.concat(all_test_touches, ignore_index=True)
+    combined_touches.to_excel("walk_forward_test_zone_touches.xlsx", index=False)
+    print(f"{len(combined_touches)} برخورد (فقط از بازه‌های test) در walk_forward_test_zone_touches.xlsx ذخیره شد")
+
+print("\n===== خلاصه‌ی نهایی =====")
+print(summary_df[["window", "train_return_pct", "test_return_pct", "test_trades", "test_win_rate_pct"]])
+
+print("\nDone!")
